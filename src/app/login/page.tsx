@@ -1,11 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { authApi } from '@/lib/auth';
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -18,10 +16,17 @@ export default function LoginPage() {
 
     try {
       await authApi.login(email, password);
-      router.push('/dashboard');
+
+      // Volver a donde el middleware interceptó al usuario, si aplica.
+      const params = new URLSearchParams(window.location.search);
+      const redirect = params.get('redirect');
+      const target = redirect?.startsWith('/') ? redirect : '/dashboard';
+
+      // Navegación completa (no `router.push`) para que el middleware vuelva a
+      // evaluarse con la cookie recién escrita.
+      window.location.href = target;
     } catch (err: any) {
       setError(err.response?.data?.message || 'Error al iniciar sesión');
-    } finally {
       setLoading(false);
     }
   };

@@ -3,25 +3,57 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import api from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
+import { Permission } from '@/lib/permissions';
 
 export default function DashboardPage() {
+  const { loading: authLoading, can } = useAuth();
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [scans, setScans] = useState<any[]>([]);
   const [workOrders, setWorkOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const canSeeOrders = can(Permission.ORDER_READ);
 
   useEffect(() => {
+    // Esperar a que se resuelvan los permisos para no pedir endpoints que el
+    // rol no puede leer (devolverían 403).
+    if (authLoading) return;
+
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+
+    // Antes cada petición tenía `.catch(() => ({data: []}))`: un fallo de
+    // permisos o de red se veía como "0 vehículos" en lugar de como un error.
     Promise.all([
-      api.get('/vehicles').catch(() => ({ data: [] })),
-      api.get('/scans').catch(() => ({ data: [] })),
-      api.get('/work-orders').catch(() => ({ data: [] })),
-    ]).then(([vRes, sRes, wRes]) => {
-      setVehicles(vRes.data || []);
-      setScans(sRes.data || []);
-      setWorkOrders(wRes.data || []);
-      setLoading(false);
-    });
-  }, []);
+      api.get('/vehicles'),
+      api.get('/scans'),
+      canSeeOrders ? api.get('/work-orders') : Promise.resolve({ data: [] }),
+    ])
+      .then(([vRes, sRes, wRes]) => {
+        if (cancelled) return;
+        setVehicles(vRes.data || []);
+        setScans(sRes.data || []);
+        setWorkOrders(wRes.data || []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(
+          err.response?.status === 403
+            ? 'Su rol no tiene permiso para consultar estos datos.'
+            : err.response?.data?.message || 'No se pudieron cargar los datos del panel.',
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, canSeeOrders]);
 
   const okCount = vehicles.filter((v) => v.status === 'OK').length;
   const alertCount = vehicles.filter((v) => v.status === 'ALERT').length;
@@ -38,6 +70,12 @@ export default function DashboardPage() {
           Estado en vivo de la flota vehicular UAGRM y evaluaciones técnicas recientes
         </p>
       </div>
+
+      {error && (
+        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          ⚠️ {error}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-5 mb-8">
         <div className="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
@@ -70,15 +108,17 @@ export default function DashboardPage() {
           <div className="text-xs text-slate-500 mt-1">Con lectura Mode 03/07/0A + PID 01</div>
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
-          <div className="text-xs font-semibold uppercase text-slate-400">
-            Órdenes de Evaluación Abiertas
+        {canSeeOrders && (
+          <div className="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
+            <div className="text-xs font-semibold uppercase text-slate-400">
+              Órdenes de Evaluación Abiertas
+            </div>
+            <div className="text-3xl font-bold text-red-600 mt-2">
+              {loading ? '—' : openOrders}
+            </div>
+            <div className="text-xs text-slate-500 mt-1">Sujetas a validación técnica humana</div>
           </div>
-          <div className="text-3xl font-bold text-red-600 mt-2">
-            {loading ? '—' : openOrders}
-          </div>
-          <div className="text-xs text-slate-500 mt-1">Sujetas a validación técnica humana</div>
-        </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -1,4 +1,6 @@
 import axios from 'axios';
+import Cookies from 'js-cookie';
+import { TOKEN_COOKIE } from './auth';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api';
 
@@ -9,28 +11,31 @@ export const api = axios.create({
   },
 });
 
-// Add auth token interceptor
 api.interceptors.request.use((config) => {
-  if (typeof window !== 'undefined') {
-    const token = localStorage.getItem('accessToken');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
+  const token = Cookies.get(TOKEN_COOKIE);
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
 });
 
-// Handle 401 responses
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401 && typeof window !== 'undefined') {
-      localStorage.removeItem('accessToken');
-      window.location.href = '/login';
+    const status = error.response?.status;
+
+    // 401: el token no sirve -> cerrar sesión.
+    // 403: el token es válido pero el rol no alcanza -> NO cerrar sesión,
+    //      la pantalla debe mostrar el mensaje de permiso insuficiente.
+    if (status === 401 && typeof window !== 'undefined') {
+      Cookies.remove(TOKEN_COOKIE, { path: '/' });
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
     }
+
     return Promise.reject(error);
   },
 );
 
 export default api;
-
