@@ -8,9 +8,13 @@ export default function DashboardLayout({
 }) {
   return (
     <AuthProvider>
-      <div className="flex min-h-screen">
+      <div className="min-h-screen bg-app">
         <Sidebar />
-        <main className="ml-64 flex-1 bg-gray-50 p-8">{children}</main>
+        {/* En pantallas angostas la barra lateral se pliega y el contenido
+            ocupa todo el ancho. */}
+        <main className="px-4 py-6 sm:px-6 lg:ml-64 lg:px-10 lg:py-8">
+          <div className="mx-auto max-w-6xl">{children}</div>
+        </main>
       </div>
     </AuthProvider>
   );

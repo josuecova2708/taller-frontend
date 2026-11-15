@@ -1,7 +1,12 @@
 'use client';
 
 import { useState } from 'react';
+import Image from 'next/image';
 import { authApi } from '@/lib/auth';
+import { mensajeDeError } from '@/lib/errors';
+import { Button } from '@/components/ui/Button';
+import { Field, Input } from '@/components/ui/Field';
+import { Notice } from '@/components/ui/Notice';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -25,58 +30,77 @@ export default function LoginPage() {
       // Navegación completa (no `router.push`) para que el middleware vuelva a
       // evaluarse con la cookie recién escrita.
       window.location.href = target;
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Error al iniciar sesión');
+    } catch (err) {
+      setError(mensajeDeError(err, 'No se pudo iniciar sesión. Intente de nuevo.'));
       setLoading(false);
     }
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-100">
-      <div className="w-full max-w-md rounded-xl bg-white p-8 shadow-lg">
-        <div className="mb-6 text-center">
-          <h1 className="text-2xl font-bold text-gray-900">🔌 Taller OBD-II</h1>
-          <p className="mt-2 text-sm text-gray-500">Diagnóstico Vehicular UAGRM</p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {error && (
-            <div className="rounded-lg bg-red-50 p-3 text-sm text-red-600">
-              {error}
-            </div>
-          )}
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700">Email</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700">Contraseña</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              required
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            {loading ? 'Ingresando...' : 'Iniciar Sesión'}
-          </button>
-        </form>
+    // Fondo blanco puro: el escudo viene sobre blanco y así no se ve su caja.
+    <div className="flex min-h-screen flex-col bg-surface">
+      <div className="flex h-1.5 shrink-0" aria-hidden="true">
+        <div className="flex-1 bg-navy" />
+        <div className="flex-1 bg-crimson" />
       </div>
+
+      <main className="flex flex-1 items-center justify-center px-4 py-10">
+        <div className="w-full max-w-sm">
+          <Image
+            src="/uagrm.jpg"
+            alt="Escudo de la Universidad Autónoma Gabriel René Moreno"
+            width={112}
+            height={109}
+            loading="eager"
+            className="mx-auto"
+          />
+
+          <h1 className="mt-6 text-center text-2xl font-semibold tracking-tight text-navy">
+            Diagnóstico vehicular preventivo
+          </h1>
+          <p className="mt-1 text-center text-sm text-ink-2">
+            Parque automotor de la Universidad Autónoma Gabriel René Moreno
+          </p>
+
+          <form onSubmit={handleSubmit} className="mt-8 space-y-4">
+            {error && <Notice tone="error">{error}</Notice>}
+
+            <Field label="Correo electrónico">
+              {(id) => (
+                <Input
+                  id={id}
+                  type="email"
+                  autoComplete="username"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+              )}
+            </Field>
+
+            <Field label="Contraseña">
+              {(id) => (
+                <Input
+                  id={id}
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              )}
+            </Field>
+
+            <Button type="submit" disabled={loading} className="w-full">
+              {loading ? 'Iniciando sesión…' : 'Iniciar sesión'}
+            </Button>
+          </form>
+
+          <p className="mt-6 text-center text-xs text-ink-3">
+            Las cuentas las crea el administrador del sistema.
+          </p>
+        </div>
+      </main>
     </div>
   );
 }

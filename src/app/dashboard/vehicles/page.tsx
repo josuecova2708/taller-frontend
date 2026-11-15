@@ -1,7 +1,20 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { FormEvent } from 'react';
+import Link from 'next/link';
 import api from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
+import { Permission } from '@/lib/permissions';
+import { mensajeDeError } from '@/lib/errors';
+import { descripcionVehiculo } from '@/lib/format';
+import { Tag, VehicleStatusBadge } from '@/components/Badges';
+import { Button } from '@/components/ui/Button';
+import { ConfirmDialog, Dialog } from '@/components/ui/Dialog';
+import { Field, Input } from '@/components/ui/Field';
+import { Notice } from '@/components/ui/Notice';
+import { EmptyState, PageHeader, Panel } from '@/components/ui/Panel';
+import { IconSearch } from '@/components/ui/icons';
 
 export interface Vehicle {
   id: string;
@@ -12,6 +25,7 @@ export interface Vehicle {
   model: string | null;
   year: number | null;
   status: 'OK' | 'ALERT' | 'CRITICAL';
+  active?: boolean;
   createdAt: string;
   _count?: {
     scans: number;
@@ -19,46 +33,79 @@ export interface Vehicle {
   };
 }
 
+const FORM_VACIO = { plate: '', vin: '', alias: '', make: '', model: '', year: '' };
+const ID_FORM = 'form-vehiculo';
+
 export default function VehiclesPage() {
+  const { can } = useAuth();
+  // Los botones de gestión solo se muestran a quien puede usarlos.
+  const puedeGestionar = can(Permission.VEHICLE_WRITE);
+
+  const [busqueda, setBusqueda] = useState('');
+  const [verBajas, setVerBajas] = useState(false);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [aviso, setAviso] = useState('');
+
   const [modalOpen, setModalOpen] = useState(false);
   const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
+  const [form, setForm] = useState(FORM_VACIO);
+  const [errorForm, setErrorForm] = useState('');
+  const [guardando, setGuardando] = useState(false);
 
-  const [form, setForm] = useState({
-    plate: '',
-    vin: '',
-    alias: '',
-    make: '',
-    model: '',
-    year: '2021',
-  });
+  const [porDarDeBaja, setPorDarDeBaja] = useState<Vehicle | null>(null);
+  const [dandoDeBaja, setDandoDeBaja] = useState(false);
 
-  const fetchVehicles = async () => {
-    try {
-      setLoading(true);
-      const { data } = await api.get('/vehicles');
-      setVehicles(data);
-      setError('');
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Error al cargar vehículos desde el backend');
-    } finally {
-      setLoading(false);
-    }
+  const pedir = useCallback(
+    () =>
+      api.get<Vehicle[]>('/vehicles', {
+        params: verBajas ? { includeInactive: 'true' } : undefined,
+      }),
+    [verBajas],
+  );
+
+  const cargar = async () => {
+    const { data } = await pedir();
+    setVehicles(data);
   };
 
   useEffect(() => {
-    fetchVehicles();
-  }, []);
+    let cancelado = false;
+    pedir()
+      .then(({ data }) => {
+        if (cancelado) return;
+        setVehicles(data);
+        setError('');
+      })
+      .catch((err) => {
+        if (!cancelado) setError(mensajeDeError(err, 'No se pudieron cargar los vehículos.'));
+      })
+      .finally(() => {
+        if (!cancelado) setLoading(false);
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [pedir]);
 
-  const openCreateModal = () => {
+  // Búsqueda por placa o VIN (también por alias, que es como se los conoce).
+  const filtrados = useMemo(() => {
+    const q = busqueda.trim().toUpperCase();
+    if (!q) return vehicles;
+    return vehicles.filter((v) =>
+      [v.plate, v.vin, v.alias].some((campo) => campo?.toUpperCase().includes(q)),
+    );
+  }, [vehicles, busqueda]);
+
+  const abrirRegistro = () => {
     setEditingVehicle(null);
-    setForm({ plate: '', vin: '', alias: '', make: 'Toyota', model: '', year: '2021' });
+    setForm(FORM_VACIO);
+    setErrorForm('');
     setModalOpen(true);
   };
 
-  const openEditModal = (v: Vehicle) => {
+  const abrirEdicion = (v: Vehicle) => {
     setEditingVehicle(v);
     setForm({
       plate: v.plate,
@@ -68,11 +115,14 @@ export default function VehiclesPage() {
       model: v.model || '',
       year: v.year ? String(v.year) : '',
     });
+    setErrorForm('');
     setModalOpen(true);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const guardar = async (e: FormEvent) => {
     e.preventDefault();
+    setGuardando(true);
+    setErrorForm('');
     try {
       const payload = {
         plate: form.plate,
@@ -85,236 +135,301 @@ export default function VehiclesPage() {
 
       if (editingVehicle) {
         await api.patch(`/vehicles/${editingVehicle.id}`, payload);
+        setAviso(`Se guardaron los cambios del vehículo ${form.plate}.`);
       } else {
         await api.post('/vehicles', payload);
+        setAviso(`Vehículo ${form.plate} registrado.`);
       }
       setModalOpen(false);
-      fetchVehicles();
-    } catch (err: any) {
-      alert(err.response?.data?.message || 'Error al guardar el vehículo');
+      await cargar();
+    } catch (err) {
+      setErrorForm(mensajeDeError(err, 'No se pudo guardar el vehículo.'));
+    } finally {
+      setGuardando(false);
     }
   };
 
-  const handleDelete = async (id: string, plate: string) => {
-    if (!confirm(`¿Seguro que deseas eliminar el vehículo ${plate}?`)) return;
+  const darDeBaja = async () => {
+    if (!porDarDeBaja) return;
+    setDandoDeBaja(true);
+    setError('');
+    setAviso('');
     try {
-      await api.delete(`/vehicles/${id}`);
-      fetchVehicles();
-    } catch (err: any) {
-      alert(err.response?.data?.message || 'Error al eliminar el vehículo');
+      await api.delete(`/vehicles/${porDarDeBaja.id}`);
+      setAviso(`El vehículo ${porDarDeBaja.plate} fue dado de baja.`);
+      await cargar();
+    } catch (err) {
+      setError(mensajeDeError(err, 'No se pudo dar de baja el vehículo.'));
+    } finally {
+      setDandoDeBaja(false);
+      setPorDarDeBaja(null);
     }
   };
 
-  const renderStatusBadge = (status: Vehicle['status']) => {
-    switch (status) {
-      case 'OK':
-        return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
-            🟢 Operativo (OK)
-          </span>
-        );
-      case 'ALERT':
-        return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
-            🟡 En Seguimiento (ALERT)
-          </span>
-        );
-      case 'CRITICAL':
-        return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-            🔴 Requiere Evaluación
-          </span>
-        );
+  const reactivar = async (v: Vehicle) => {
+    setError('');
+    setAviso('');
+    try {
+      await api.patch(`/vehicles/${v.id}/reactivate`);
+      setAviso(`El vehículo ${v.plate} volvió a la flota.`);
+      await cargar();
+    } catch (err) {
+      setError(mensajeDeError(err, 'No se pudo reactivar el vehículo.'));
     }
   };
+
+  const campo = (nombre: keyof typeof FORM_VACIO) => ({
+    value: form[nombre],
+    onChange: (e: { target: { value: string } }) =>
+      setForm((f) => ({ ...f, [nombre]: e.target.value })),
+  });
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Flota de Vehículos UAGRM</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Gestión de unidades institucionales y estado preventivo por escaneo OBD-II
-          </p>
-        </div>
-        <button
-          onClick={openCreateModal}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
-        >
-          + Registrar Vehículo
-        </button>
-      </div>
+      <PageHeader
+        title="Vehículos"
+        description="Registro de los vehículos de la flota y su estado según el último escaneo."
+        actions={
+          puedeGestionar && <Button onClick={abrirRegistro}>Registrar vehículo</Button>
+        }
+      />
 
+      {aviso && (
+        <Notice tone="success" className="mb-4">
+          {aviso}
+        </Notice>
+      )}
       {error && (
-        <div className="mb-4 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
+        <Notice tone="error" className="mb-4">
           {error}
-        </div>
+        </Notice>
       )}
 
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        {loading ? (
-          <div className="p-8 text-center text-slate-500">Cargando flota de vehículos...</div>
-        ) : vehicles.length === 0 ? (
-          <div className="p-8 text-center text-slate-500">
-            No hay vehículos registrados. Haz clic en &ldquo;+ Registrar Vehículo&rdquo; para comenzar.
-          </div>
-        ) : (
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold">
-                <th className="py-3.5 px-4">Placa / Alias</th>
-                <th className="py-3.5 px-4">Vehículo</th>
-                <th className="py-3.5 px-4">VIN (Modo 09)</th>
-                <th className="py-3.5 px-4">Estado</th>
-                <th className="py-3.5 px-4 text-center">Escaneos</th>
-                <th className="py-3.5 px-4 text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 text-sm">
-              {vehicles.map((v) => (
-                <tr key={v.id} className="hover:bg-slate-50/80">
-                  <td className="py-3.5 px-4">
-                    <div className="font-bold text-slate-900">{v.plate}</div>
-                    <div className="text-xs text-slate-500">{v.alias || 'Sin alias asignado'}</div>
-                  </td>
-                  <td className="py-3.5 px-4 text-slate-700">
-                    {[v.make, v.model, v.year].filter(Boolean).join(' ') || '—'}
-                  </td>
-                  <td className="py-3.5 px-4 font-mono text-xs text-slate-600">
-                    {v.vin || <span className="text-slate-400 italic">No registrado</span>}
-                  </td>
-                  <td className="py-3.5 px-4">{renderStatusBadge(v.status)}</td>
-                  <td className="py-3.5 px-4 text-center font-medium text-slate-700">
-                    {v._count?.scans ?? 0}
-                  </td>
-                  <td className="py-3.5 px-4 text-right space-x-2">
-                    <button
-                      onClick={() => openEditModal(v)}
-                      className="px-2.5 py-1 text-xs font-medium text-blue-600 bg-blue-50 rounded hover:bg-blue-100"
-                    >
-                      Editar
-                    </button>
-                    <button
-                      onClick={() => handleDelete(v.id, v.plate)}
-                      className="px-2.5 py-1 text-xs font-medium text-red-600 bg-red-50 rounded hover:bg-red-100"
-                    >
-                      Eliminar
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-3">
+        <div className="relative w-full sm:w-80">
+          <IconSearch
+            width={16}
+            height={16}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-off"
+          />
+          <Input
+            type="search"
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder="Buscar por placa, VIN o alias"
+            aria-label="Buscar vehículo por placa, VIN o alias"
+            className="pl-9"
+          />
+        </div>
+        {puedeGestionar && (
+          <label className="flex items-center gap-2 text-sm text-ink-2">
+            <input
+              type="checkbox"
+              checked={verBajas}
+              onChange={(e) => setVerBajas(e.target.checked)}
+              className="h-4 w-4 accent-navy"
+            />
+            Mostrar vehículos dados de baja
+          </label>
         )}
       </div>
 
-      {modalOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-lg font-bold text-slate-900 mb-4">
-              {editingVehicle ? `Editar Vehículo ${editingVehicle.plate}` : 'Registrar Nuevo Vehículo'}
-            </h2>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Placa *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="5521-TAC"
-                    value={form.plate}
-                    onChange={(e) => setForm({ ...form, plate: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Año
-                  </label>
-                  <input
-                    type="number"
-                    placeholder="2021"
-                    value={form.year}
-                    onChange={(e) => setForm({ ...form, year: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  VIN (17 caracteres - opcional si la ECU no lo reporta)
-                </label>
-                <input
-                  type="text"
-                  placeholder="5TFCZ5AN3MX255216"
-                  value={form.vin}
-                  onChange={(e) => setForm({ ...form, vin: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono text-slate-900"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Marca
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Toyota"
-                    value={form.make}
-                    onChange={(e) => setForm({ ...form, make: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Modelo
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Tacoma"
-                    value={form.model}
-                    onChange={(e) => setForm({ ...form, model: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Alias / Unidad Asignada
-                </label>
-                <input
-                  type="text"
-                  placeholder="Camioneta Facultad Ciencias Agrícolas"
-                  value={form.alias}
-                  onChange={(e) => setForm({ ...form, alias: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setModalOpen(false)}
-                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-sm bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700"
-                >
-                  Guardar
-                </button>
-              </div>
-            </form>
+      <Panel flush>
+        {loading ? (
+          <p className="p-5 text-sm text-ink-3">Cargando vehículos…</p>
+        ) : vehicles.length === 0 ? (
+          <EmptyState title="Todavía no hay vehículos registrados">
+            {puedeGestionar
+              ? 'Use «Registrar vehículo» para agregar el primero.'
+              : 'El administrador debe registrar los vehículos de la flota.'}
+          </EmptyState>
+        ) : filtrados.length === 0 ? (
+          <EmptyState title={`Ningún vehículo coincide con «${busqueda.trim()}»`}>
+            Revise la placa o borre la búsqueda para ver toda la flota.
+          </EmptyState>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[56rem] border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-line bg-app text-xs font-medium text-ink-3">
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Placa
+                  </th>
+                  <th scope="col" className="px-4 py-2.5 font-medium">
+                    Vehículo
+                  </th>
+                  <th scope="col" className="px-4 py-2.5 font-medium">
+                    Número de chasis (VIN)
+                  </th>
+                  <th scope="col" className="px-4 py-2.5 font-medium">
+                    Estado
+                  </th>
+                  <th scope="col" className="px-4 py-2.5 text-right font-medium">
+                    Escaneos
+                  </th>
+                  {puedeGestionar && (
+                    <th scope="col" className="px-5 py-2.5 text-right font-medium">
+                      Acciones
+                    </th>
+                  )}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {filtrados.map((v) => {
+                  const deBaja = v.active === false;
+                  return (
+                    <tr key={v.id} className={deBaja ? 'bg-app' : 'hover:bg-app'}>
+                      <td className="px-5 py-3">
+                        <Link
+                          href={`/dashboard/vehicles/${v.id}`}
+                          className={`code font-semibold hover:underline ${deBaja ? 'text-ink-3' : 'text-navy'}`}
+                        >
+                          {v.plate}
+                        </Link>
+                        <div className="text-xs text-ink-3">{v.alias || 'Sin alias'}</div>
+                      </td>
+                      <td className="px-4 py-3 text-ink-2">
+                        {descripcionVehiculo(v) || 'Sin datos'}
+                      </td>
+                      <td className="px-4 py-3">
+                        {v.vin ? (
+                          <span className="code text-xs text-ink-2">{v.vin}</span>
+                        ) : (
+                          <span className="text-xs text-ink-3">No registrado</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {deBaja ? <Tag>Dado de baja</Tag> : <VehicleStatusBadge status={v.status} />}
+                      </td>
+                      <td className="nums px-4 py-3 text-right text-ink-2">
+                        {v._count?.scans ?? 0}
+                      </td>
+                      {puedeGestionar && (
+                        <td className="px-5 py-3">
+                          <div className="flex justify-end gap-2">
+                            {deBaja ? (
+                              <Button variant="secondary" size="sm" onClick={() => reactivar(v)}>
+                                Reactivar
+                              </Button>
+                            ) : (
+                              <>
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  onClick={() => abrirEdicion(v)}
+                                >
+                                  Editar
+                                </Button>
+                                <Button
+                                  variant="danger"
+                                  size="sm"
+                                  onClick={() => setPorDarDeBaja(v)}
+                                >
+                                  Dar de baja
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        </div>
-      )}
+        )}
+      </Panel>
+
+      <Dialog
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={editingVehicle ? `Editar vehículo ${editingVehicle.plate}` : 'Registrar vehículo'}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setModalOpen(false)} disabled={guardando}>
+              Cancelar
+            </Button>
+            <Button type="submit" form={ID_FORM} disabled={guardando}>
+              {guardando
+                ? 'Guardando…'
+                : editingVehicle
+                  ? 'Guardar cambios'
+                  : 'Registrar vehículo'}
+            </Button>
+          </>
+        }
+      >
+        <form id={ID_FORM} onSubmit={guardar} className="space-y-4">
+          {errorForm && <Notice tone="error">{errorForm}</Notice>}
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Placa">
+              {(id) => (
+                <Input id={id} required placeholder="5521-TAC" className="code" {...campo('plate')} />
+              )}
+            </Field>
+            <Field label="Año">
+              {(id) => (
+                <Input
+                  id={id}
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="2021"
+                  {...campo('year')}
+                />
+              )}
+            </Field>
+          </div>
+
+          <Field
+            label="Número de chasis (VIN)"
+            hint="Opcional. Son 17 caracteres; algunos vehículos no lo informan al escáner."
+          >
+            {(id) => (
+              <Input
+                id={id}
+                placeholder="5TFCZ5AN3MX255216"
+                className="code"
+                {...campo('vin')}
+              />
+            )}
+          </Field>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Marca">
+              {(id) => <Input id={id} placeholder="Toyota" {...campo('make')} />}
+            </Field>
+            <Field label="Modelo">
+              {(id) => <Input id={id} placeholder="Tacoma" {...campo('model')} />}
+            </Field>
+          </div>
+
+          <Field label="Alias o unidad asignada" hint="El nombre con que se lo conoce en la universidad.">
+            {(id) => (
+              <Input
+                id={id}
+                placeholder="Camioneta de Ciencias Agrícolas"
+                {...campo('alias')}
+              />
+            )}
+          </Field>
+        </form>
+      </Dialog>
+
+      <ConfirmDialog
+        open={porDarDeBaja !== null}
+        title="Dar de baja el vehículo"
+        confirmLabel="Dar de baja"
+        destructive
+        busy={dandoDeBaja}
+        onConfirm={darDeBaja}
+        onCancel={() => setPorDarDeBaja(null)}
+      >
+        El vehículo <span className="code font-semibold text-ink">{porDarDeBaja?.plate}</span>{' '}
+        dejará de aparecer en la flota. Sus escaneos y órdenes se conservan, y puede
+        reactivarlo cuando quiera.
+      </ConfirmDialog>
     </div>
   );
 }

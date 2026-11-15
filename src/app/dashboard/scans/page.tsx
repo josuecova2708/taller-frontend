@@ -1,297 +1,354 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import api from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
+import { Permission } from '@/lib/permissions';
+import { estadoHttp, mensajeDeError } from '@/lib/errors';
+import { descripcionVehiculo, fechaHora } from '@/lib/format';
+import { diagnosisState, dictamenDe, type Scan, type ScanSeverity } from '@/lib/types';
+import { DtcTypeBadge, SEVERIDAD, SeverityBadge, Tag } from '@/components/Badges';
+import { Button } from '@/components/ui/Button';
+import { Field, Input, Select } from '@/components/ui/Field';
+import { Notice } from '@/components/ui/Notice';
+import { EmptyState, PageHeader, Panel } from '@/components/ui/Panel';
+import { IconAlert, Spinner } from '@/components/ui/icons';
 
-interface DtcEntry {
-  id: string;
-  code: string;
-  type: 'CONFIRMED' | 'PENDING' | 'PERMANENT';
-  description?: string;
-}
+/** Escaneos de ejemplo que se pueden registrar desde la web para una demostración. */
+const ESCENARIOS = {
+  tacoma: {
+    etiqueta: 'Falla confirmada (Tacoma)',
+    payload: {
+      vin: '5TFCZ5AN3MX255216',
+      batteryVoltage: 13.3,
+      readinessStatus: {
+        milOn: true,
+        dtcCount: 2,
+        monitorsCompleted: true,
+        incompleteMonitors: [],
+        compressionIgnition: false,
+      },
+      protocol: {
+        number: '6',
+        automatic: true,
+        isCan: true,
+        label: 'ISO 15765-4 CAN (11 bit, 500 kbaud)',
+        raw: 'A6',
+      },
+      dtcs: [
+        { code: 'P0300', type: 'CONFIRMED' },
+        { code: 'P0301', type: 'CONFIRMED' },
+      ],
+    },
+  },
+  bus_reset: {
+    etiqueta: 'Código pendiente con lectura no concluyente (bus)',
+    payload: {
+      vin: 'JTGFB518701122334',
+      batteryVoltage: 12.5,
+      readinessStatus: {
+        milOn: false,
+        dtcCount: 0,
+        monitorsCompleted: false,
+        incompleteMonitors: ['Catalizador', 'Sensor de Oxígeno', 'Sistema EVAP'],
+        batteryResetSuspected: true,
+        compressionIgnition: false,
+      },
+      dtcs: [{ code: 'P2195', type: 'PENDING' }],
+    },
+  },
+  clean: {
+    etiqueta: 'Escaneo sin fallas',
+    payload: {
+      vin: '8AJBA3CD201928374',
+      batteryVoltage: 13.9,
+      readinessStatus: {
+        milOn: false,
+        dtcCount: 0,
+        monitorsCompleted: true,
+        incompleteMonitors: [],
+        compressionIgnition: false,
+      },
+      dtcs: [],
+    },
+  },
+} as const;
 
-interface Scan {
-  id: string;
-  vehicleId: string;
-  batteryVoltage: number | null;
-  scannedAt: string;
-  severity: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  notes: string | null;
-  readinessStatus: {
-    milOn?: boolean;
-    dtcCount?: number;
-    monitorsCompleted?: boolean;
-    incompleteMonitors?: string[];
-    batteryResetSuspected?: boolean;
-  } | null;
-  vehicle: {
-    plate: string;
-    alias: string | null;
-    make: string | null;
-    model: string | null;
-  };
-  scannedBy: {
-    name: string;
-    email: string;
-  };
-  dtcEntries: DtcEntry[];
-  diagnosis?: {
-    summary: string;
-    recommendations: string[];
-    provider: string;
-  } | null;
+type EscenarioKey = keyof typeof ESCENARIOS;
+
+const pedirEscaneos = () => api.get<Scan[]>('/scans');
+
+const SEVERIDADES: ScanSeverity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NONE'];
+
+const FILTROS_VACIOS = { vehiculo: '', severidad: '', desde: '', hasta: '' };
+
+/** Día local de un escaneo, en el formato de `<input type="date">`. */
+function diaLocal(iso: string): string {
+  const d = new Date(iso);
+  const dos = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${dos(d.getMonth() + 1)}-${dos(d.getDate())}`;
 }
 
 export default function ScansPage() {
+  const { can } = useAuth();
   const [scans, setScans] = useState<Scan[]>([]);
   const [loading, setLoading] = useState(true);
-  const [simulating, setSimulating] = useState(false);
+  const [error, setError] = useState('');
+  const [simulando, setSimulando] = useState(false);
+  const [filtros, setFiltros] = useState(FILTROS_VACIOS);
 
-  const fetchScans = async () => {
-    try {
-      setLoading(true);
-      const { data } = await api.get('/scans');
-      setScans(data);
-    } catch (err) {
-      console.error('Error al cargar escaneos:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Vehículos que aparecen en el historial, para el filtro.
+  const vehiculos = useMemo(() => {
+    const mapa = new Map<string, string>();
+    for (const s of scans) mapa.set(s.vehicleId, s.vehicle.plate);
+    return [...mapa].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [scans]);
 
-  useEffect(() => {
-    fetchScans();
+  const filtrados = useMemo(
+    () =>
+      scans.filter((s) => {
+        const dia = diaLocal(s.scannedAt);
+        return (
+          (!filtros.vehiculo || s.vehicleId === filtros.vehiculo) &&
+          (!filtros.severidad || s.severity === filtros.severidad) &&
+          (!filtros.desde || dia >= filtros.desde) &&
+          (!filtros.hasta || dia <= filtros.hasta)
+        );
+      }),
+    [scans, filtros],
+  );
+
+  const hayFiltros = Object.values(filtros).some(Boolean);
+  const filtro = (nombre: keyof typeof FILTROS_VACIOS) => ({
+    value: filtros[nombre],
+    onChange: (e: { target: { value: string } }) =>
+      setFiltros((f) => ({ ...f, [nombre]: e.target.value })),
+  });
+
+  const cargar = useCallback(async () => {
+    const { data } = await pedirEscaneos();
+    setScans(data);
   }, []);
 
-  const triggerSimulatedScan = async (scenario: 'tacoma' | 'bus_reset' | 'clean') => {
-    try {
-      setSimulating(true);
-      if (scenario === 'tacoma') {
-        await api.post('/scans', {
-          vin: '5TFCZ5AN3MX255216',
-          batteryVoltage: 13.3,
-          readinessStatus: {
-            milOn: true,
-            dtcCount: 2,
-            monitorsCompleted: true,
-            incompleteMonitors: [],
-          },
-          dtcs: [
-            { code: 'P0300', type: 'CONFIRMED' },
-            { code: 'P0301', type: 'CONFIRMED' },
-            { code: 'P0301', type: 'PERMANENT' },
-          ],
-        });
-      } else if (scenario === 'bus_reset') {
-        await api.post('/scans', {
-          vin: 'JTGFB518701122334',
-          batteryVoltage: 12.5,
-          readinessStatus: {
-            milOn: false,
-            dtcCount: 0,
-            monitorsCompleted: false,
-            incompleteMonitors: ['Catalizador', 'Sensor O2', 'EVAP'],
-            batteryResetSuspected: true,
-          },
-          dtcs: [{ code: 'P2195', type: 'PENDING' }],
-        });
-      } else {
-        await api.post('/scans', {
-          vin: '8AJBA3CD201928374',
-          batteryVoltage: 13.9,
-          readinessStatus: {
-            milOn: false,
-            dtcCount: 0,
-            monitorsCompleted: true,
-            incompleteMonitors: [],
-          },
-          dtcs: [],
-        });
-      }
-      await fetchScans();
-    } catch (err: any) {
-      alert(err.response?.data?.message || 'Error al simular escaneo');
-    } finally {
-      setSimulating(false);
-    }
-  };
+  useEffect(() => {
+    pedirEscaneos()
+      .then(({ data }) => setScans(data))
+      .catch((err) =>
+        setError(
+          estadoHttp(err) === 403
+            ? 'Su rol no tiene permiso para consultar escaneos.'
+            : mensajeDeError(err, 'No se pudieron cargar los escaneos.'),
+        ),
+      )
+      .finally(() => setLoading(false));
+  }, []);
 
-  const severityBadge = (sev: Scan['severity']) => {
-    const map: Record<Scan['severity'], { bg: string; label: string }> = {
-      NONE: { bg: 'bg-emerald-100 text-emerald-800', label: 'SIN FALLAS (NONE)' },
-      LOW: { bg: 'bg-blue-100 text-blue-800', label: 'SEGUIMIENTO (LOW)' },
-      MEDIUM: { bg: 'bg-amber-100 text-amber-800', label: 'EVALUACIÓN MEDIA' },
-      HIGH: { bg: 'bg-orange-100 text-orange-800', label: 'PRIORIDAD ALTA' },
-      CRITICAL: { bg: 'bg-red-100 text-red-800', label: 'CRÍTICO (RECURRENTE)' },
-    };
-    const item = map[sev] || map.NONE;
-    return (
-      <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${item.bg}`}>
-        {item.label}
-      </span>
-    );
+  // Hay escaneos esperando su hipótesis: se refresca la lista sola.
+  useEffect(() => {
+    const hayPendientes = scans.some((s) => diagnosisState(s) === 'generando');
+    if (!hayPendientes) return;
+
+    const timer = setTimeout(() => {
+      cargar().catch(() => {});
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [scans, cargar]);
+
+  const simular = async (key: EscenarioKey) => {
+    setSimulando(true);
+    setError('');
+    try {
+      await api.post('/scans', ESCENARIOS[key].payload);
+      await cargar();
+    } catch (err) {
+      setError(mensajeDeError(err, 'No se pudo registrar el escaneo de demostración.'));
+    } finally {
+      setSimulando(false);
+    }
   };
 
   return (
     <div>
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Historial de Escaneos OBD-II</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Lecturas recibidas desde la app Android con estado global de monitores (Mode 01 PID 01) y filtro determinístico
+      <PageHeader
+        title="Escaneos"
+        description="Historial de las lecturas enviadas desde la aplicación móvil, de la más reciente a la más antigua."
+      />
+
+      {error && (
+        <Notice tone="error" className="mb-4">
+          {error}
+        </Notice>
+      )}
+
+      {!loading && scans.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-end gap-x-4 gap-y-3">
+          <Field label="Vehículo" className="w-full sm:w-44">
+            {(id) => (
+              <Select id={id} {...filtro('vehiculo')}>
+                <option value="">Todos</option>
+                {vehiculos.map(([vehicleId, placa]) => (
+                  <option key={vehicleId} value={vehicleId}>
+                    {placa}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          <Field label="Severidad" className="w-full sm:w-40">
+            {(id) => (
+              <Select id={id} {...filtro('severidad')}>
+                <option value="">Todas</option>
+                {SEVERIDADES.map((sev) => (
+                  <option key={sev} value={sev}>
+                    {SEVERIDAD[sev].label}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          <Field label="Desde" className="w-[calc(50%-0.5rem)] sm:w-40">
+            {(id) => <Input id={id} type="date" max={filtros.hasta || undefined} {...filtro('desde')} />}
+          </Field>
+          <Field label="Hasta" className="w-[calc(50%-0.5rem)] sm:w-40">
+            {(id) => <Input id={id} type="date" min={filtros.desde || undefined} {...filtro('hasta')} />}
+          </Field>
+          {hayFiltros && (
+            <Button variant="quiet" onClick={() => setFiltros(FILTROS_VACIOS)}>
+              Quitar filtros
+            </Button>
+          )}
+          <p className="ml-auto pb-2 text-sm text-ink-2">
+            <span className="nums font-semibold text-ink">{filtrados.length}</span> de{' '}
+            <span className="nums">{scans.length}</span>{' '}
+            {scans.length === 1 ? 'escaneo' : 'escaneos'}
           </p>
         </div>
+      )}
 
-        <div className="flex items-center gap-2">
-          <button
-            disabled={simulating}
-            onClick={() => triggerSimulatedScan('tacoma')}
-            className="px-3 py-2 text-xs font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
-          >
-            ⚡ Simular Caso Tacoma (P0300/P0301)
-          </button>
-          <button
-            disabled={simulating}
-            onClick={() => triggerSimulatedScan('bus_reset')}
-            className="px-3 py-2 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
-          >
-            🔋 Simular Caso Bus (Post-Batería)
-          </button>
-          <button
-            disabled={simulating}
-            onClick={() => triggerSimulatedScan('clean')}
-            className="px-3 py-2 text-xs font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
-          >
-            ✅ Simular Escaneo Limpio
-          </button>
-        </div>
-      </div>
+      <Panel flush>
+        {loading ? (
+          <p className="p-5 text-sm text-ink-3">Cargando escaneos…</p>
+        ) : scans.length > 0 && filtrados.length === 0 ? (
+          <EmptyState title="Ningún escaneo coincide con los filtros">
+            Cambie el vehículo, la severidad o las fechas, o quite los filtros.
+          </EmptyState>
+        ) : scans.length === 0 ? (
+          <EmptyState title="Aún no se registró ningún escaneo">
+            Los escaneos se envían desde la aplicación móvil al conectar el lector al
+            vehículo.
+          </EmptyState>
+        ) : (
+          <ul className="divide-y divide-line">
+            {filtrados.map((scan) => (
+              <FilaEscaneo key={scan.id} scan={scan} />
+            ))}
+          </ul>
+        )}
+      </Panel>
 
-      {loading ? (
-        <div className="bg-white rounded-xl p-8 text-center text-slate-500 border border-slate-200">
-          Cargando historial de escaneos...
-        </div>
-      ) : scans.length === 0 ? (
-        <div className="bg-white rounded-xl p-8 text-center text-slate-500 border border-slate-200">
-          No hay escaneos registrados todavía.
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {scans.map((scan) => {
-            const monitorsOk = scan.readinessStatus?.monitorsCompleted ?? true;
-            const incompleteList = scan.readinessStatus?.incompleteMonitors || [];
-            return (
-              <div
-                key={scan.id}
-                className="bg-white rounded-xl shadow-sm border border-slate-200 p-5"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg font-bold text-slate-900">
-                        {scan.vehicle.plate}
-                      </span>
-                      <span className="text-sm text-slate-600">
-                        {[scan.vehicle.make, scan.vehicle.model].filter(Boolean).join(' ')} —{' '}
-                        {scan.vehicle.alias}
-                      </span>
-                    </div>
-                    <div className="text-xs text-slate-400 mt-0.5">
-                      Escaneado el {new Date(scan.scannedAt).toLocaleString()} por{' '}
-                      {scan.scannedBy?.name || 'Inspector'}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3">
-                    {scan.batteryVoltage && (
-                      <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded text-xs font-mono">
-                        🔋 {scan.batteryVoltage.toFixed(1)}V
-                      </span>
-                    )}
-                    <span
-                      className={`px-2.5 py-1 rounded text-xs font-medium ${
-                        monitorsOk
-                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                          : 'bg-amber-50 text-amber-800 border border-amber-200'
-                      }`}
-                    >
-                      {monitorsOk
-                        ? 'Monitores OBD: Completos'
-                        : `Monitores Incompletos (${incompleteList.join(', ') || 'Recalibrando'})`}
-                    </span>
-                    {severityBadge(scan.severity)}
-                  </div>
-                </div>
-
-                {/* Códigos DTC */}
-                <div className="mt-3">
-                  <div className="text-xs font-semibold uppercase text-slate-400 mb-2">
-                    Códigos DTC Reportados ({scan.dtcEntries.length})
-                  </div>
-                  {scan.dtcEntries.length === 0 ? (
-                    <div className="text-sm text-emerald-700 font-medium">
-                      ✓ Ningún código DTC reportado en Modos 03 / 07 / 0A
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {scan.dtcEntries.map((dtc) => (
-                        <div
-                          key={dtc.id}
-                          className="flex items-start justify-between p-2.5 rounded-lg bg-slate-50 border border-slate-200"
-                        >
-                          <div>
-                            <span className="font-mono font-bold text-slate-900 mr-2">
-                              {dtc.code}
-                            </span>
-                            <span className="text-xs text-slate-600">{dtc.description}</span>
-                          </div>
-                          <span
-                            className={`text-[11px] font-semibold px-2 py-0.5 rounded ${
-                              dtc.type === 'CONFIRMED'
-                                ? 'bg-red-100 text-red-800'
-                                : dtc.type === 'PERMANENT'
-                                ? 'bg-purple-100 text-purple-800'
-                                : 'bg-amber-100 text-amber-800'
-                            }`}
-                          >
-                            {dtc.type}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Dictamen del filtro determinístico / Hipótesis IA */}
-                {scan.notes && (
-                  <div className="mt-3 p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs text-slate-700">
-                    <span className="font-semibold text-slate-900">
-                      Dictamen Filtro Determinístico:{' '}
-                    </span>
-                    {scan.notes}
-                  </div>
-                )}
-
-                {scan.diagnosis && (
-                  <div className="mt-3 p-3.5 bg-indigo-50/70 rounded-lg border border-indigo-200 text-xs text-slate-800">
-                    <div className="font-bold text-indigo-950 mb-1">
-                      🤖 Hipótesis Técnica Asistida ({scan.diagnosis.provider.toUpperCase()}) — Sujeta a validación humana:
-                    </div>
-                    <p className="mb-2">{scan.diagnosis.summary}</p>
-                    {Array.isArray(scan.diagnosis.recommendations) && (
-                      <ul className="list-disc list-inside space-y-0.5 text-slate-700">
-                        {scan.diagnosis.recommendations.map((rec, i) => (
-                          <li key={i}>{rec}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+      {can(Permission.SCAN_CREATE) && (
+        <details className="mt-6 rounded-panel border border-dashed border-line-strong bg-surface">
+          <summary className="cursor-pointer rounded-panel px-5 py-3 text-sm font-medium text-ink-2 hover:text-navy">
+            Datos de demostración
+          </summary>
+          <div className="border-t border-line px-5 py-4">
+            <p className="mb-3 max-w-[75ch] text-sm text-ink-2">
+              Cada botón registra un escaneo de ejemplo, como si llegara desde la
+              aplicación móvil. Queda guardado en el historial. Los dos primeros piden
+              una hipótesis a la IA, que tiene costo (unos 2 centavos de dólar cada una).
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {(Object.keys(ESCENARIOS) as EscenarioKey[]).map((key) => (
+                <Button
+                  key={key}
+                  variant="secondary"
+                  size="sm"
+                  disabled={simulando}
+                  onClick={() => simular(key)}
+                >
+                  {ESCENARIOS[key].etiqueta}
+                </Button>
+              ))}
+              {simulando && (
+                <span className="flex items-center gap-2 text-xs text-ink-3">
+                  <Spinner /> Registrando…
+                </span>
+              )}
+            </div>
+          </div>
+        </details>
       )}
     </div>
+  );
+}
+
+function EstadoHipotesis({ scan }: { scan: Scan }) {
+  const estado = diagnosisState(scan);
+
+  if (estado === 'lista') return <Tag tone="marca">Con hipótesis de IA</Tag>;
+  if (estado === 'fallida') return <Tag>Hipótesis no generada</Tag>;
+  if (estado === 'generando') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-2">
+        <Spinner />
+        Generando hipótesis…
+      </span>
+    );
+  }
+  return null;
+}
+
+function FilaEscaneo({ scan }: { scan: Scan }) {
+  const concluyente = scan.readinessStatus?.monitorsCompleted ?? true;
+  const dictamen = dictamenDe(scan);
+  const vehiculo = scan.vehicle.alias || descripcionVehiculo(scan.vehicle);
+
+  return (
+    <li>
+      <Link
+        href={`/dashboard/scans/${scan.id}`}
+        className="block px-5 py-4 transition-colors hover:bg-app"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+          <div className="min-w-0">
+            <p className="text-sm">
+              <span className="code font-semibold text-ink">{scan.vehicle.plate}</span>
+              {vehiculo && <span className="ml-2 text-ink-2">{vehiculo}</span>}
+            </p>
+            <p className="mt-0.5 text-xs text-ink-3">
+              {fechaHora(scan.scannedAt)}
+              {scan.scannedBy?.name ? ` · ${scan.scannedBy.name}` : ''}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <EstadoHipotesis scan={scan} />
+            <SeverityBadge severity={scan.severity} />
+          </div>
+        </div>
+
+        {scan.dtcEntries.length > 0 && (
+          <ul className="mt-2.5 flex flex-wrap gap-x-5 gap-y-1.5">
+            {scan.dtcEntries.map((dtc) => (
+              <li key={dtc.id} className="flex items-center gap-1.5">
+                <span className="code text-sm font-semibold text-ink">{dtc.code}</span>
+                <DtcTypeBadge type={dtc.type} />
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {!concluyente && (
+          <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-warn">
+            <IconAlert width={14} height={14} className="shrink-0" />
+            Lectura no concluyente: hay que volver a escanear
+          </p>
+        )}
+
+        {dictamen && (
+          <p className="mt-2 line-clamp-2 max-w-[90ch] text-sm text-ink-2">{dictamen}</p>
+        )}
+      </Link>
+    </li>
   );
 }

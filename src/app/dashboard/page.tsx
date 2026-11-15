@@ -1,16 +1,69 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import api from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { Permission } from '@/lib/permissions';
+import { estadoHttp, mensajeDeError } from '@/lib/errors';
+import { descripcionVehiculo, diasDesde, hace } from '@/lib/format';
+import {
+  dictamenDe,
+  type FleetVehicle,
+  type Scan,
+  type VehicleStatus,
+  type WorkOrder,
+} from '@/lib/types';
+import { ESTADO_VEHICULO, PriorityBadge, SeverityBadge } from '@/components/Badges';
+import { EmptyState, PageHeader, Panel } from '@/components/ui/Panel';
+import { Notice } from '@/components/ui/Notice';
+import { IconAlert, IconClock, IconOrder } from '@/components/ui/icons';
+
+/**
+ * Días sin escaneo a partir de los cuales un vehículo se considera atrasado.
+ * El sistema es de escaneos PERIÓDICOS: un vehículo que nadie escanea no está
+ * "operativo", simplemente no se sabe cómo está.
+ */
+const DIAS_SIN_ESCANEO = 30;
+
+/** Lo más grave primero: así el orden de la franja ya cuenta la historia. */
+const ORDEN_ESTADO: VehicleStatus[] = ['CRITICAL', 'ALERT', 'OK'];
+
+const CELDA: Record<VehicleStatus, string> = {
+  OK: 'border-l-ok bg-ok-soft/50 hover:bg-ok-soft',
+  ALERT: 'border-l-warn bg-warn-soft/60 hover:bg-warn-soft',
+  CRITICAL: 'border-l-danger bg-danger-soft/70 hover:bg-danger-soft',
+};
+
+/** Texto de la leyenda, concordando en número con la cantidad. */
+const LEYENDA: Record<VehicleStatus, (n: number) => string> = {
+  OK: (n) => (n === 1 ? 'operativo' : 'operativos'),
+  ALERT: () => 'en seguimiento',
+  CRITICAL: (n) => (n === 1 ? 'requiere evaluación' : 'requieren evaluación'),
+};
+
+/** Sin escaneo reciente (o sin ninguno): su estado ya no es confiable. */
+function escaneoAtrasado(v: FleetVehicle): boolean {
+  const ultimo = v.scans?.[0];
+  return !ultimo || diasDesde(ultimo.scannedAt) >= DIAS_SIN_ESCANEO;
+}
+
+interface Pendiente {
+  id: string;
+  href: string;
+  icono: ReactNode;
+  tono: string;
+  titulo: ReactNode;
+  detalle: string;
+  extra?: ReactNode;
+}
 
 export default function DashboardPage() {
   const { loading: authLoading, can } = useAuth();
-  const [vehicles, setVehicles] = useState<any[]>([]);
-  const [scans, setScans] = useState<any[]>([]);
-  const [workOrders, setWorkOrders] = useState<any[]>([]);
+  const [vehicles, setVehicles] = useState<FleetVehicle[]>([]);
+  const [scans, setScans] = useState<Scan[]>([]);
+  const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -22,28 +75,28 @@ export default function DashboardPage() {
     if (authLoading) return;
 
     let cancelled = false;
-    setLoading(true);
-    setError('');
 
-    // Antes cada petición tenía `.catch(() => ({data: []}))`: un fallo de
-    // permisos o de red se veía como "0 vehículos" en lugar de como un error.
+    // Un fallo de permisos o de red se muestra como error, no como "0 vehículos".
     Promise.all([
-      api.get('/vehicles'),
-      api.get('/scans'),
-      canSeeOrders ? api.get('/work-orders') : Promise.resolve({ data: [] }),
+      api.get<FleetVehicle[]>('/vehicles'),
+      api.get<Scan[]>('/scans'),
+      canSeeOrders
+        ? api.get<WorkOrder[]>('/work-orders')
+        : Promise.resolve({ data: [] as WorkOrder[] }),
     ])
       .then(([vRes, sRes, wRes]) => {
         if (cancelled) return;
-        setVehicles(vRes.data || []);
-        setScans(sRes.data || []);
-        setWorkOrders(wRes.data || []);
+        setVehicles(vRes.data ?? []);
+        setScans(sRes.data ?? []);
+        setWorkOrders(wRes.data ?? []);
+        setError('');
       })
       .catch((err) => {
         if (cancelled) return;
         setError(
-          err.response?.status === 403
+          estadoHttp(err) === 403
             ? 'Su rol no tiene permiso para consultar estos datos.'
-            : err.response?.data?.message || 'No se pudieron cargar los datos del panel.',
+            : mensajeDeError(err, 'No se pudo cargar el estado de la flota.'),
         );
       })
       .finally(() => {
@@ -55,147 +108,265 @@ export default function DashboardPage() {
     };
   }, [authLoading, canSeeOrders]);
 
-  const okCount = vehicles.filter((v) => v.status === 'OK').length;
-  const alertCount = vehicles.filter((v) => v.status === 'ALERT').length;
-  const criticalCount = vehicles.filter((v) => v.status === 'CRITICAL').length;
-  const openOrders = workOrders.filter((w) => w.status === 'OPEN' || w.status === 'IN_PROGRESS').length;
+  const flota = useMemo(
+    () =>
+      [...vehicles].sort(
+        (a, b) =>
+          ORDEN_ESTADO.indexOf(a.status) - ORDEN_ESTADO.indexOf(b.status) ||
+          a.plate.localeCompare(b.plate),
+      ),
+    [vehicles],
+  );
+
+  const conteo = useMemo(() => {
+    const c: Record<VehicleStatus, number> = { OK: 0, ALERT: 0, CRITICAL: 0 };
+    for (const v of vehicles) c[v.status] += 1;
+    return c;
+  }, [vehicles]);
+
+  const ordenesAbiertas = workOrders.filter(
+    (o) => o.status === 'OPEN' || o.status === 'IN_PROGRESS',
+  );
+
+  const pendientes = useMemo<Pendiente[]>(() => {
+    const lista: Pendiente[] = [];
+
+    for (const v of flota.filter((x) => x.status === 'CRITICAL')) {
+      const ultimo = v.scans?.[0];
+      const codigos = ultimo?.dtcEntries.map((d) => d.code).join(', ');
+      lista.push({
+        id: `eval-${v.id}`,
+        href: ultimo ? `/dashboard/scans/${ultimo.id}` : '/dashboard/vehicles',
+        icono: <IconAlert />,
+        tono: 'text-danger',
+        titulo: (
+          <>
+            <span className="code">{v.plate}</span> requiere evaluación
+          </>
+        ),
+        detalle:
+          (codigos ? `Códigos ${codigos}. ` : '') +
+          (ultimo ? (dictamenDe(ultimo) ?? '') : 'Sin escaneos registrados.'),
+      });
+    }
+
+    for (const o of ordenesAbiertas.filter((x) => !x.assignedTo)) {
+      lista.push({
+        id: `orden-${o.id}`,
+        href: `/dashboard/work-orders/${o.id}`,
+        icono: <IconOrder />,
+        tono: 'text-navy',
+        titulo: (
+          <>
+            Orden sin mecánico asignado
+            {o.vehicle ? (
+              <>
+                {' '}
+                para <span className="code">{o.vehicle.plate}</span>
+              </>
+            ) : null}
+          </>
+        ),
+        detalle: `Abierta ${hace(o.createdAt)}.`,
+        extra: <PriorityBadge priority={o.priority} />,
+      });
+    }
+
+    for (const v of flota) {
+      if (!escaneoAtrasado(v)) continue;
+      const ultimo = v.scans?.[0];
+      const dias = ultimo ? diasDesde(ultimo.scannedAt) : null;
+      lista.push({
+        id: `atraso-${v.id}`,
+        href: '/dashboard/vehicles',
+        icono: <IconClock />,
+        tono: 'text-warn',
+        titulo: (
+          <>
+            <span className="code">{v.plate}</span>{' '}
+            {dias === null ? 'nunca fue escaneado' : `lleva ${dias} días sin escaneo`}
+          </>
+        ),
+        detalle: `El escaneo periódico se espera al menos cada ${DIAS_SIN_ESCANEO} días.`,
+      });
+    }
+
+    return lista;
+  }, [flota, ordenesAbiertas]);
 
   return (
     <div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">
-          Panel General — Diagnóstico Preventivo OBD-II
-        </h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Estado en vivo de la flota vehicular UAGRM y evaluaciones técnicas recientes
-        </p>
-      </div>
+      <PageHeader
+        title="Flota"
+        description="Estado del parque automotor según el último escaneo de cada vehículo."
+      />
 
       {error && (
-        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-          ⚠️ {error}
-        </div>
+        <Notice tone="error" className="mb-6">
+          {error}
+        </Notice>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-5 mb-8">
-        <div className="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
-          <div className="text-xs font-semibold uppercase text-slate-400">Total Vehículos</div>
-          <div className="text-3xl font-bold text-slate-900 mt-2">
-            {loading ? '—' : vehicles.length}
-          </div>
-          <div className="text-xs text-slate-500 mt-1">
-            🟢 {okCount} OK · 🟡 {alertCount} Seguimiento · 🔴 {criticalCount} Críticos
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
-          <div className="text-xs font-semibold uppercase text-slate-400">
-            Unidades en Seguimiento / Evaluación
-          </div>
-          <div className="text-3xl font-bold text-amber-600 mt-2">
-            {loading ? '—' : alertCount + criticalCount}
-          </div>
-          <div className="text-xs text-slate-500 mt-1">
-            Requieren re-escaneo o validación mecánica
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
-          <div className="text-xs font-semibold uppercase text-slate-400">Escaneos Registrados</div>
-          <div className="text-3xl font-bold text-blue-600 mt-2">
-            {loading ? '—' : scans.length}
-          </div>
-          <div className="text-xs text-slate-500 mt-1">Con lectura Mode 03/07/0A + PID 01</div>
-        </div>
-
-        {canSeeOrders && (
-          <div className="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
-            <div className="text-xs font-semibold uppercase text-slate-400">
-              Órdenes de Evaluación Abiertas
+      {/* La flota, vehículo por vehículo. */}
+      <Panel className="mb-6">
+        {loading ? (
+          <p className="text-sm text-ink-3">Cargando la flota…</p>
+        ) : flota.length === 0 ? (
+          <EmptyState title="Todavía no hay vehículos registrados">
+            {can(Permission.VEHICLE_WRITE) ? (
+              <Link href="/dashboard/vehicles" className="font-medium text-navy underline">
+                Registrar el primer vehículo
+              </Link>
+            ) : (
+              'El administrador debe registrar los vehículos de la flota.'
+            )}
+          </EmptyState>
+        ) : (
+          <>
+            <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-8 gap-y-2">
+              <p className="text-sm text-ink-2">
+                <span className="nums text-3xl font-semibold text-navy">{flota.length}</span>{' '}
+                {flota.length === 1 ? 'vehículo' : 'vehículos'}
+              </p>
+              <ul className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-ink-2">
+                {(['OK', 'ALERT', 'CRITICAL'] as VehicleStatus[]).map((estado) => (
+                  <li key={estado} className="flex items-center gap-2">
+                    <span
+                      className={`h-2.5 w-2.5 rounded-sm ${ESTADO_VEHICULO[estado].punto}`}
+                      aria-hidden="true"
+                    />
+                    <span className="nums font-semibold text-ink">{conteo[estado]}</span>
+                    {LEYENDA[estado](conteo[estado])}
+                  </li>
+                ))}
+              </ul>
             </div>
-            <div className="text-3xl font-bold text-red-600 mt-2">
-              {loading ? '—' : openOrders}
-            </div>
-            <div className="text-xs text-slate-500 mt-1">Sujetas a validación técnica humana</div>
-          </div>
+
+            <ul className="grid grid-cols-[repeat(auto-fill,minmax(8.5rem,1fr))] gap-2">
+              {flota.map((v) => {
+                const ultimo = v.scans?.[0];
+                const atrasado = escaneoAtrasado(v);
+                return (
+                  <li key={v.id}>
+                    <Link
+                      href={ultimo ? `/dashboard/scans/${ultimo.id}` : '/dashboard/vehicles'}
+                      title={
+                        `${v.plate}: ${ESTADO_VEHICULO[v.status].label}` +
+                        (atrasado ? ' (escaneo atrasado)' : '')
+                      }
+                      className={`block rounded-control border-l-4 px-3 py-2 transition-colors ${CELDA[v.status]}`}
+                    >
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="code text-sm font-semibold text-ink">{v.plate}</span>
+                        {/* Un vehículo sin escaneo reciente no está "bien":
+                            simplemente no se sabe cómo está. */}
+                        {atrasado && (
+                          <IconClock width={14} height={14} className="shrink-0 text-warn" />
+                        )}
+                      </span>
+                      <span className="block truncate text-xs text-ink-2">
+                        {v.alias || descripcionVehiculo(v) || 'Sin descripción'}
+                      </span>
+                      <span className="sr-only">
+                        {ESTADO_VEHICULO[v.status].label}
+                        {atrasado ? ', escaneo atrasado' : ''}
+                      </span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
         )}
-      </div>
+      </Panel>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Resumen de flota */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="font-bold text-slate-900">Estado Actual de la Flota</h2>
-            <Link
-              href="/dashboard/vehicles"
-              className="text-xs font-semibold text-blue-600 hover:underline"
-            >
-              Ver todos →
-            </Link>
-          </div>
-          <div className="space-y-3">
-            {vehicles.map((v) => (
-              <div
-                key={v.id}
-                className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100"
-              >
-                <div>
-                  <div className="font-bold text-slate-900 text-sm">
-                    {v.plate} — {[v.make, v.model, v.year].filter(Boolean).join(' ')}
-                  </div>
-                  <div className="text-xs text-slate-500">{v.alias}</div>
-                </div>
-                <span
-                  className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
-                    v.status === 'OK'
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : v.status === 'ALERT'
-                      ? 'bg-amber-100 text-amber-800'
-                      : 'bg-red-100 text-red-800'
-                  }`}
-                >
-                  {v.status === 'OK'
-                    ? '🟢 OK'
-                    : v.status === 'ALERT'
-                    ? '🟡 Seguimiento'
-                    : '🔴 Evaluación'}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
+        <Panel title="Requiere atención" flush className="lg:col-span-3">
+          {loading ? (
+            <p className="p-5 text-sm text-ink-3">Cargando…</p>
+          ) : pendientes.length === 0 ? (
+            <EmptyState title="No hay nada pendiente">
+              Toda la flota está al día con sus escaneos y sin fallas por evaluar.
+            </EmptyState>
+          ) : (
+            <ul className="divide-y divide-line">
+              {pendientes.map((p) => (
+                <li key={p.id}>
+                  <Link
+                    href={p.href}
+                    className="flex items-start gap-3 px-5 py-3.5 transition-colors hover:bg-app"
+                  >
+                    <span className={`mt-0.5 shrink-0 ${p.tono}`}>{p.icono}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium text-ink">{p.titulo}</span>
+                      <span className="mt-0.5 line-clamp-2 block text-sm text-ink-2">
+                        {p.detalle}
+                      </span>
+                    </span>
+                    {p.extra && <span className="shrink-0">{p.extra}</span>}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
 
-        {/* Últimos escaneos */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="font-bold text-slate-900">Últimos Escaneos Recibidos</h2>
+        <Panel
+          title="Últimos escaneos"
+          flush
+          className="lg:col-span-2"
+          action={
             <Link
               href="/dashboard/scans"
-              className="text-xs font-semibold text-blue-600 hover:underline"
+              className="text-sm font-medium text-navy hover:underline"
             >
-              Ver historial →
+              Ver historial
             </Link>
-          </div>
-          <div className="space-y-3">
-            {scans.slice(0, 4).map((s) => (
-              <div
-                key={s.id}
-                className="p-3 rounded-lg bg-slate-50 border border-slate-100 text-sm"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-900">
-                    {s.vehicle?.plate} ({s.dtcEntries?.length || 0} DTCs)
-                  </span>
-                  <span className="text-xs text-slate-500">
-                    {new Date(s.scannedAt).toLocaleString()}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-600 mt-1 line-clamp-2">{s.notes}</p>
-              </div>
-            ))}
-          </div>
-        </div>
+          }
+        >
+          {loading ? (
+            <p className="p-5 text-sm text-ink-3">Cargando…</p>
+          ) : scans.length === 0 ? (
+            <EmptyState title="Aún no se registró ningún escaneo">
+              Los escaneos se envían desde la aplicación móvil.
+            </EmptyState>
+          ) : (
+            <ul className="divide-y divide-line">
+              {scans.slice(0, 5).map((s) => (
+                <li key={s.id}>
+                  <Link
+                    href={`/dashboard/scans/${s.id}`}
+                    className="flex items-center justify-between gap-3 px-5 py-3 transition-colors hover:bg-app"
+                  >
+                    <span className="min-w-0">
+                      <span className="code block text-sm font-semibold text-ink">
+                        {s.vehicle?.plate}
+                      </span>
+                      <span className="block text-xs text-ink-3">{hace(s.scannedAt)}</span>
+                    </span>
+                    <SeverityBadge severity={s.severity} />
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
       </div>
+
+      {!loading && !error && (
+        <dl className="mt-6 flex flex-wrap gap-x-10 gap-y-3 text-sm">
+          <div>
+            <dt className="text-ink-3">Escaneos registrados</dt>
+            <dd className="nums text-lg font-semibold text-ink">{scans.length}</dd>
+          </div>
+          {canSeeOrders && (
+            <div>
+              <dt className="text-ink-3">Órdenes de trabajo abiertas</dt>
+              <dd className="nums text-lg font-semibold text-ink">{ordenesAbiertas.length}</dd>
+            </div>
+          )}
+        </dl>
+      )}
     </div>
   );
 }
