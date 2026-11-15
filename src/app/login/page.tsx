@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Image from 'next/image';
+import Link from 'next/link';
 import { authApi } from '@/lib/auth';
 import { mensajeDeError } from '@/lib/errors';
 import { Button } from '@/components/ui/Button';
@@ -98,6 +99,17 @@ export default function LoginPage() {
 
           <p className="mt-6 text-center text-xs text-ink-3">
             Las cuentas las crea el administrador del sistema.
+          </p>
+          <p className="mt-2 text-center text-xs text-ink-3">
+            Al iniciar sesión acepta los{' '}
+            <Link href="/terminos" className="font-medium text-navy hover:underline">
+              Términos de uso
+            </Link>{' '}
+            y la{' '}
+            <Link href="/privacidad" className="font-medium text-navy hover:underline">
+              Política de privacidad
+            </Link>
+            .
           </p>
         </div>
       </main>

@@ -175,6 +175,15 @@ export default function Sidebar() {
             <IconLogout />
             Cerrar sesión
           </button>
+          <div className="mt-3 flex gap-3 px-3 text-xs text-ink-3">
+            <Link href="/privacidad" className="hover:text-navy hover:underline">
+              Privacidad
+            </Link>
+            <span aria-hidden="true">·</span>
+            <Link href="/terminos" className="hover:text-navy hover:underline">
+              Términos
+            </Link>
+          </div>
         </div>
       </aside>
     </>
