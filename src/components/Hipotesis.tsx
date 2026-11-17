@@ -29,8 +29,8 @@ export function Hipotesis({ diagnosis: d, severidadEscaneo }: HipotesisProps) {
       {/* La validación humana es el eje del sistema: va antes del contenido. */}
       <Notice tone="warning" className="mb-4">
         <strong className="font-semibold">Requiere validación de un profesional.</strong> Lo
-        que sigue son hipótesis por verificar, no un diagnóstico confirmado. La decisión de
-        autorizar la operación del vehículo es siempre de una persona.
+        que sigue son hipótesis por verificar, no un diagnóstico confirmado. La decisión de que
+        el vehículo vuelva a operar es siempre de una persona.
       </Notice>
 
       <p className="max-w-[75ch] text-sm leading-relaxed text-ink">{d.summary}</p>

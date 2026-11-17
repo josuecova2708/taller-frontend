@@ -16,7 +16,6 @@ export const Permission = {
   ORDER_ASSIGN: 'order:assign',
   ORDER_UPDATE_STATUS: 'order:update_status',
   ORDER_CLOSE: 'order:close',
-  VEHICLE_AUTHORIZE: 'vehicle:authorize',
   REPORT_EXPORT: 'report:export',
 } as const;
 

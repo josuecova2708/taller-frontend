@@ -65,6 +65,13 @@ export interface Diagnosis {
   createdAt: string;
 }
 
+/** Inspector responsable de un vehículo. */
+export interface Responsible {
+  id: string;
+  name: string;
+  email: string;
+}
+
 export interface VehicleSummary {
   id?: string;
   plate: string;
@@ -74,6 +81,8 @@ export interface VehicleSummary {
   year?: number | null;
   vin?: string | null;
   status?: VehicleStatus;
+  /** Inspector responsable; `null` si no tiene. */
+  responsible?: Responsible | null;
 }
 
 /** Vehículo tal como lo devuelve `GET /vehicles`: con su último escaneo. */
@@ -153,6 +162,7 @@ export interface WorkOrder {
   notes: string | null;
   n8nNotified: boolean;
   closedAt?: string | null;
+  /** Se cerró como completada y el vehículo volvió a operativo. */
   operationAuthorized?: boolean;
   closedBy?: { id: string; name: string } | null;
   createdAt: string;

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import api from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
 import { estadoHttp, mensajeDeError } from '@/lib/errors';
 import { hace } from '@/lib/format';
 import type { WorkOrder, WorkOrderPriority, WorkOrderStatus } from '@/lib/types';
@@ -27,12 +28,22 @@ const PRIORIDADES: Array<{ valor: WorkOrderPriority | 'TODAS'; etiqueta: string 
   { valor: 'LOW', etiqueta: 'Baja' },
 ];
 
+type Asignacion = 'TODAS' | 'SIN_ASIGNAR' | 'MIAS';
+
+const ASIGNACIONES: Array<{ valor: Asignacion; etiqueta: string }> = [
+  { valor: 'TODAS', etiqueta: 'Todas' },
+  { valor: 'SIN_ASIGNAR', etiqueta: 'Sin asignar' },
+  { valor: 'MIAS', etiqueta: 'Mías' },
+];
+
 export default function WorkOrdersPage() {
+  const { user } = useAuth();
   const [ordenes, setOrdenes] = useState<WorkOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [estado, setEstado] = useState<WorkOrderStatus | 'TODAS'>('TODAS');
   const [prioridad, setPrioridad] = useState<WorkOrderPriority | 'TODAS'>('TODAS');
+  const [asignacion, setAsignacion] = useState<Asignacion>('TODAS');
 
   useEffect(() => {
     api
@@ -53,9 +64,15 @@ export default function WorkOrdersPage() {
       ordenes.filter(
         (o) =>
           (estado === 'TODAS' || o.status === estado) &&
-          (prioridad === 'TODAS' || o.priority === prioridad),
+          (prioridad === 'TODAS' || o.priority === prioridad) &&
+          (asignacion === 'TODAS' ||
+            // «Sin asignar» solo tiene sentido para órdenes que siguen abiertas.
+            (asignacion === 'SIN_ASIGNAR' &&
+              !o.assignedTo &&
+              ['OPEN', 'IN_PROGRESS'].includes(o.status)) ||
+            (asignacion === 'MIAS' && !!user && o.assignedTo?.id === user.id)),
       ),
-    [ordenes, estado, prioridad],
+    [ordenes, estado, prioridad, asignacion, user],
   );
 
   const abiertas = ordenes.filter((o) =>
@@ -107,6 +124,21 @@ export default function WorkOrdersPage() {
               </Select>
             )}
           </Field>
+          <Field label="Asignación" className="w-40">
+            {(id) => (
+              <Select
+                id={id}
+                value={asignacion}
+                onChange={(e) => setAsignacion(e.target.value as Asignacion)}
+              >
+                {ASIGNACIONES.map((o) => (
+                  <option key={o.valor} value={o.valor}>
+                    {o.etiqueta}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
           <p className="ml-auto pb-2 text-sm text-ink-2">
             <span className="nums font-semibold text-ink">{abiertas}</span> sin cerrar de{' '}
             <span className="nums">{ordenes.length}</span>
@@ -123,7 +155,7 @@ export default function WorkOrdersPage() {
           </EmptyState>
         ) : filtradas.length === 0 ? (
           <EmptyState title="Ninguna orden coincide con los filtros">
-            Cambie el estado o la prioridad para ver más órdenes.
+            Cambie el estado, la prioridad o la asignación para ver más órdenes.
           </EmptyState>
         ) : (
           <ul className="divide-y divide-line">

@@ -95,13 +95,16 @@ export default function VehicleDetailPage() {
       </div>
 
       <Panel title="Datos del vehículo">
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-4">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-3 lg:grid-cols-5">
           <Dato label="Número de chasis (VIN)">
             {vehiculo.vin ? (
               <span className="code text-xs">{vehiculo.vin}</span>
             ) : (
               <span className="text-ink-2">No registrado</span>
             )}
+          </Dato>
+          <Dato label="Responsable">
+            {vehiculo.responsible?.name ?? <span className="text-ink-2">Sin asignar</span>}
           </Dato>
           <Dato label="Registrado el">{fecha(vehiculo.createdAt)}</Dato>
           <Dato label="Escaneos">

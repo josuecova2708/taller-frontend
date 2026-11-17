@@ -178,7 +178,7 @@ export default function DashboardPage() {
       const dias = ultimo ? diasDesde(ultimo.scannedAt) : null;
       lista.push({
         id: `atraso-${v.id}`,
-        href: '/dashboard/vehicles',
+        href: `/dashboard/vehicles/${v.id}`,
         icono: <IconClock />,
         tono: 'text-warn',
         titulo: (
@@ -187,7 +187,9 @@ export default function DashboardPage() {
             {dias === null ? 'nunca fue escaneado' : `lleva ${dias} días sin escaneo`}
           </>
         ),
-        detalle: `El escaneo periódico se espera al menos cada ${DIAS_SIN_ESCANEO} días.`,
+        detalle:
+          (v.responsible ? `Responsable: ${v.responsible.name}. ` : 'Sin responsable. ') +
+          `El escaneo periódico se espera al menos cada ${DIAS_SIN_ESCANEO} días.`,
       });
     }
 

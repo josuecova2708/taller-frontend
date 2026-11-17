@@ -50,7 +50,6 @@ export default function WorkOrderDetailPage() {
   const [notas, setNotas] = useState('');
   const [resolucion, setResolucion] = useState('');
   const [cierreTipo, setCierreTipo] = useState<'COMPLETED' | 'CANCELLED'>('COMPLETED');
-  const [autorizar, setAutorizar] = useState(false);
   const [confirmandoCierre, setConfirmandoCierre] = useState(false);
 
   const pedir = useCallback(
@@ -122,25 +121,28 @@ export default function WorkOrderDetailPage() {
       return mensaje;
     });
 
+  const tomar = () =>
+    ejecutar(async () => {
+      await api.post(`/work-orders/${orderId}/take`);
+      return 'Tomó la orden. Ya puede registrar el avance y cerrarla al terminar.';
+    });
+
   const cerrar = () => {
     setConfirmandoCierre(false);
     return ejecutar(async () => {
-      const autoriza = autorizar && cierreTipo === 'COMPLETED';
       const { data } = await api.post<{
         vehicleStatus: VehicleStatus | null;
         operationAuthorized: boolean;
       }>(`/work-orders/${orderId}/close`, {
         status: cierreTipo,
         resolution: resolucion,
-        authorizeOperation: autoriza,
       });
       setResolucion('');
-      setAutorizar(false);
       if (data.operationAuthorized) {
-        return 'Orden cerrada y operación autorizada. El vehículo queda operativo.';
+        return 'Orden cerrada. El vehículo vuelve a estar operativo.';
       }
       return data.vehicleStatus
-        ? `Orden cerrada. Según su último escaneo, el vehículo queda en estado «${ESTADO_VEHICULO[data.vehicleStatus].label.toLowerCase()}».`
+        ? `Orden cancelada. Según su último escaneo, el vehículo queda en estado «${ESTADO_VEHICULO[data.vehicleStatus].label.toLowerCase()}».`
         : 'Orden cerrada. El vehículo conserva su estado porque tiene otras órdenes sin cerrar.';
     });
   };
@@ -179,10 +181,17 @@ export default function WorkOrderDetailPage() {
   // Solo el mecánico asignado avanza la orden; quien administra las órdenes
   // también puede hacerlo. El servidor aplica la misma regla.
   const esAsignado = !!user && orden.assignedTo?.id === user.id;
-  const puedeAvanzar =
-    can(Permission.ORDER_UPDATE_STATUS) && (esAsignado || can(Permission.ORDER_ASSIGN));
-  const puedeAutorizar = can(Permission.VEHICLE_AUTHORIZE) && cierreTipo === 'COMPLETED';
-  const autoriza = autorizar && puedeAutorizar;
+  const administra = can(Permission.ORDER_ASSIGN);
+  const puedeAvanzar = can(Permission.ORDER_UPDATE_STATUS) && (esAsignado || administra);
+  // Un mecánico toma por su cuenta una orden abierta y sin asignar.
+  const puedeTomar =
+    orden.status === 'OPEN' &&
+    !orden.assignedTo &&
+    user?.role === 'MECHANIC' &&
+    can(Permission.ORDER_UPDATE_STATUS);
+  // El mecánico cierra solo la orden que tiene asignada; el administrador,
+  // cualquiera. El servidor aplica la misma regla.
+  const puedeCerrar = can(Permission.ORDER_CLOSE) && (esAsignado || administra);
   const d = orden.diagnosis;
 
   return (
@@ -216,6 +225,11 @@ export default function WorkOrderDetailPage() {
         <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-4 border-t border-line pt-4 sm:grid-cols-2">
           <Dato label="Mecánico asignado">
             {orden.assignedTo?.name ?? <span className="text-ink-2">Sin asignar</span>}
+          </Dato>
+          <Dato label="Responsable del vehículo">
+            {orden.vehicle?.responsible?.name ?? (
+              <span className="text-ink-2">Sin responsable</span>
+            )}
           </Dato>
           {orden.vehicle?.status && (
             <Dato label="Estado del vehículo">
@@ -285,21 +299,30 @@ export default function WorkOrderDetailPage() {
           {orden.closedAt && (
             <>
               {' '}
-              Se cerró el {fechaHora(orden.closedAt)}
-              {orden.closedBy ? `, por ${orden.closedBy.name}` : ''}.{' '}
-              {orden.operationAuthorized
-                ? 'Se autorizó la operación del vehículo.'
-                : 'No se autorizó la operación del vehículo.'}
+              Cerrada por {orden.closedBy?.name ?? 'un usuario no registrado'} el{' '}
+              {fechaHora(orden.closedAt)}.
+              {orden.operationAuthorized ? ' El vehículo volvió a quedar operativo.' : ''}
             </>
           )}
         </Notice>
       )}
 
-      {abierta && can(Permission.ORDER_UPDATE_STATUS) && !puedeAvanzar && (
+      {abierta && puedeTomar && (
+        <Panel title="Orden sin asignar">
+          <p className="max-w-[75ch] text-sm text-ink-2">
+            Nadie tomó esta orden todavía. Al tomarla queda a su cargo y en proceso.
+          </p>
+          <Button className="mt-3" onClick={tomar} disabled={trabajando}>
+            {trabajando ? 'Tomando…' : 'Tomar orden'}
+          </Button>
+        </Panel>
+      )}
+
+      {abierta && can(Permission.ORDER_UPDATE_STATUS) && !puedeAvanzar && !puedeTomar && (
         <Notice tone="info">
           {orden.assignedTo
-            ? `Esta orden está asignada a ${orden.assignedTo.name}. Solo esa persona puede registrar el avance.`
-            : 'Esta orden todavía no tiene mecánico asignado. El administrador debe asignarla antes de registrar avances.'}
+            ? `Esta orden está asignada a ${orden.assignedTo.name}. Solo esa persona puede registrar el avance y cerrarla.`
+            : 'Esta orden todavía no tiene mecánico asignado.'}
         </Notice>
       )}
 
@@ -361,15 +384,8 @@ export default function WorkOrderDetailPage() {
         </Panel>
       )}
 
-      {abierta && can(Permission.ORDER_CLOSE) && (
+      {abierta && puedeCerrar && (
         <Panel title="Cierre de la orden">
-          <p className="mb-4 max-w-[75ch] text-sm text-ink-2">
-            Cerrar la orden y autorizar la operación del vehículo son dos decisiones
-            distintas. Si solo cierra la orden, el estado del vehículo se toma de su último
-            escaneo: seguirá en «requiere evaluación» hasta que un escaneo nuevo confirme
-            la reparación.
-          </p>
-
           <div className="space-y-4">
             <Field label="Resultado" className="sm:w-64">
               {(id) => (
@@ -403,21 +419,15 @@ export default function WorkOrderDetailPage() {
               )}
             </Field>
 
-            {puedeAutorizar && (
-              <label className="flex items-start gap-2.5 rounded-control border border-line-strong px-3.5 py-3 text-sm text-ink">
-                <input
-                  type="checkbox"
-                  checked={autorizar}
-                  onChange={(e) => setAutorizar(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 shrink-0 accent-navy"
-                />
-                <span>
-                  <span className="font-semibold">Autorizar la operación del vehículo.</span>{' '}
-                  <span className="text-ink-2">
-                    El vehículo pasa a operativo y queda registrado que usted lo autorizó.
-                  </span>
-                </span>
-              </label>
+            {cierreTipo === 'COMPLETED' ? (
+              <p className="max-w-[75ch] text-sm text-ink-2">
+                Al cerrar, el vehículo vuelve a quedar operativo y queda registrado que usted
+                lo cerró.
+              </p>
+            ) : (
+              <p className="max-w-[75ch] text-sm text-ink-2">
+                Cancelar no da por reparado el vehículo: su estado se toma del último escaneo.
+              </p>
             )}
           </div>
 
@@ -444,9 +454,9 @@ export default function WorkOrderDetailPage() {
           {cierreTipo === 'COMPLETED' ? 'completada' : 'cancelada'}
         </strong>{' '}
         y no se podrá volver a abrir.{' '}
-        {autoriza
-          ? 'Además, usted autoriza que el vehículo vuelva a operar.'
-          : 'No se autoriza la operación del vehículo.'}
+        {cierreTipo === 'COMPLETED'
+          ? 'El vehículo vuelve a quedar operativo y queda registrado que usted lo cerró.'
+          : 'El estado del vehículo se tomará de su último escaneo.'}
       </ConfirmDialog>
     </div>
   );

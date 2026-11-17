@@ -11,10 +11,11 @@ import { descripcionVehiculo } from '@/lib/format';
 import { Tag, VehicleStatusBadge } from '@/components/Badges';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog, Dialog } from '@/components/ui/Dialog';
-import { Field, Input } from '@/components/ui/Field';
+import { Field, Input, Select } from '@/components/ui/Field';
 import { Notice } from '@/components/ui/Notice';
 import { EmptyState, PageHeader, Panel } from '@/components/ui/Panel';
 import { IconSearch } from '@/components/ui/icons';
+import type { Responsible } from '@/lib/types';
 
 export interface Vehicle {
   id: string;
@@ -27,13 +28,29 @@ export interface Vehicle {
   status: 'OK' | 'ALERT' | 'CRITICAL';
   active?: boolean;
   createdAt: string;
+  responsible?: Responsible | null;
   _count?: {
     scans: number;
     workOrders: number;
   };
 }
 
-const FORM_VACIO = { plate: '', vin: '', alias: '', make: '', model: '', year: '' };
+interface Usuario {
+  id: string;
+  name: string;
+  role: string;
+  active?: boolean;
+}
+
+const FORM_VACIO = {
+  plate: '',
+  vin: '',
+  alias: '',
+  make: '',
+  model: '',
+  year: '',
+  responsibleId: '',
+};
 const ID_FORM = 'form-vehiculo';
 
 export default function VehiclesPage() {
@@ -56,6 +73,21 @@ export default function VehiclesPage() {
 
   const [porDarDeBaja, setPorDarDeBaja] = useState<Vehicle | null>(null);
   const [dandoDeBaja, setDandoDeBaja] = useState(false);
+
+  // Candidatos a responsable: inspectores con la cuenta activa. La lista de
+  // usuarios solo la ve quien administra cuentas; quien no, no ve el selector.
+  const puedeVerUsuarios = can(Permission.USER_MANAGE);
+  const [inspectores, setInspectores] = useState<Usuario[]>([]);
+
+  useEffect(() => {
+    if (!puedeGestionar || !puedeVerUsuarios) return;
+    api
+      .get<Usuario[]>('/auth/users')
+      .then(({ data }) =>
+        setInspectores(data.filter((u) => u.role === 'INSPECTOR' && u.active !== false)),
+      )
+      .catch(() => setInspectores([]));
+  }, [puedeGestionar, puedeVerUsuarios]);
 
   const pedir = useCallback(
     () =>
@@ -89,12 +121,15 @@ export default function VehiclesPage() {
     };
   }, [pedir]);
 
-  // Búsqueda por placa o VIN (también por alias, que es como se los conoce).
+  // Búsqueda por placa o VIN (también por alias, que es como se los conoce, y
+  // por el nombre del responsable).
   const filtrados = useMemo(() => {
     const q = busqueda.trim().toUpperCase();
     if (!q) return vehicles;
     return vehicles.filter((v) =>
-      [v.plate, v.vin, v.alias].some((campo) => campo?.toUpperCase().includes(q)),
+      [v.plate, v.vin, v.alias, v.responsible?.name].some((campo) =>
+        campo?.toUpperCase().includes(q),
+      ),
     );
   }, [vehicles, busqueda]);
 
@@ -114,6 +149,7 @@ export default function VehiclesPage() {
       make: v.make || '',
       model: v.model || '',
       year: v.year ? String(v.year) : '',
+      responsibleId: v.responsible?.id ?? '',
     });
     setErrorForm('');
     setModalOpen(true);
@@ -132,12 +168,20 @@ export default function VehiclesPage() {
         model: form.model || undefined,
         year: form.year ? parseInt(form.year, 10) : undefined,
       };
+      // El responsable solo se envía si el selector está disponible y el valor
+      // cambió («Sin asignar» = null). Así un responsable que dejó de ser
+      // candidato no impide guardar el resto de los datos.
+      const responsableOriginal = editingVehicle?.responsible?.id ?? '';
+      const datos =
+        puedeVerUsuarios && form.responsibleId !== responsableOriginal
+          ? { ...payload, responsibleId: form.responsibleId || null }
+          : payload;
 
       if (editingVehicle) {
-        await api.patch(`/vehicles/${editingVehicle.id}`, payload);
+        await api.patch(`/vehicles/${editingVehicle.id}`, datos);
         setAviso(`Se guardaron los cambios del vehículo ${form.plate}.`);
       } else {
-        await api.post('/vehicles', payload);
+        await api.post('/vehicles', datos);
         setAviso(`Vehículo ${form.plate} registrado.`);
       }
       setModalOpen(false);
@@ -216,8 +260,8 @@ export default function VehiclesPage() {
             type="search"
             value={busqueda}
             onChange={(e) => setBusqueda(e.target.value)}
-            placeholder="Buscar por placa, VIN o alias"
-            aria-label="Buscar vehículo por placa, VIN o alias"
+            placeholder="Buscar por placa, VIN, alias o responsable"
+            aria-label="Buscar vehículo por placa, VIN, alias o responsable"
             className="pl-9"
           />
         </div>
@@ -249,7 +293,7 @@ export default function VehiclesPage() {
           </EmptyState>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[56rem] border-collapse text-left text-sm">
+            <table className="w-full min-w-[64rem] border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-line bg-app text-xs font-medium text-ink-3">
                   <th scope="col" className="px-5 py-2.5 font-medium">
@@ -260,6 +304,9 @@ export default function VehiclesPage() {
                   </th>
                   <th scope="col" className="px-4 py-2.5 font-medium">
                     Número de chasis (VIN)
+                  </th>
+                  <th scope="col" className="px-4 py-2.5 font-medium">
+                    Responsable
                   </th>
                   <th scope="col" className="px-4 py-2.5 font-medium">
                     Estado
@@ -296,6 +343,13 @@ export default function VehiclesPage() {
                           <span className="code text-xs text-ink-2">{v.vin}</span>
                         ) : (
                           <span className="text-xs text-ink-3">No registrado</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {v.responsible ? (
+                          <span className="text-ink">{v.responsible.name}</span>
+                        ) : (
+                          <span className="text-xs text-ink-3">Sin asignar</span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -414,6 +468,33 @@ export default function VehiclesPage() {
               />
             )}
           </Field>
+
+          {puedeVerUsuarios && (
+            <Field
+              label="Responsable"
+              hint="Inspector que recibe los avisos cuando el vehículo necesita revisión."
+            >
+              {(id) => (
+                <Select id={id} {...campo('responsibleId')}>
+                  <option value="">Sin asignar</option>
+                  {/* Si el responsable actual ya no es candidato (desactivado o
+                      con otro rol), se lo muestra igual para no perderlo en
+                      silencio al guardar. */}
+                  {editingVehicle?.responsible &&
+                    !inspectores.some((u) => u.id === editingVehicle.responsible?.id) && (
+                      <option value={editingVehicle.responsible.id}>
+                        {editingVehicle.responsible.name}
+                      </option>
+                    )}
+                  {inspectores.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          )}
         </form>
       </Dialog>
 

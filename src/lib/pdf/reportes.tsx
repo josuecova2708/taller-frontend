@@ -408,6 +408,7 @@ export function ReporteOrden({ orden, ctx }: { orden: WorkOrder; ctx: Contexto }
             ['Estado', ESTADO_ORDEN[orden.status] ?? orden.status],
             ['Prioridad', PRIORIDAD[orden.priority] ?? orden.priority],
             ['Mecánico asignado', orden.assignedTo?.name ?? 'Sin asignar'],
+            ['Responsable del vehículo', orden.vehicle?.responsible?.name ?? 'Sin responsable'],
             [
               'Estado del vehículo',
               orden.vehicle?.status
@@ -438,12 +439,12 @@ export function ReporteOrden({ orden, ctx }: { orden: WorkOrder; ctx: Contexto }
         <Seccion titulo="Cierre">
           <Datos
             pares={[
-              ['Cerrada el', orden.closedAt ? fechaHora(orden.closedAt) : 'Sin dato'],
-              ['Cerrada por', orden.closedBy?.name ?? 'Sin dato'],
               [
-                'Operación del vehículo',
-                orden.operationAuthorized ? 'Autorizada' : 'No autorizada',
+                'Cierre',
+                `Cerrada por ${orden.closedBy?.name ?? 'usuario no registrado'}` +
+                  (orden.closedAt ? ` el ${fechaHora(orden.closedAt)}` : ''),
               ],
+              ['Resultado', orden.status === 'COMPLETED' ? 'Completada' : 'Cancelada'],
             ]}
           />
         </Seccion>
